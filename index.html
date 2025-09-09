@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>АЗС Алчевск — статус топлива</title>
+
+  <!-- Яндекс карты -->
+  <script src="https://api-maps.yandex.ru/2.1/?lang=ru_RU" type="text/javascript"></script>
+
+  <style>
+    html, body, #map { height:100%; margin:0; }
+    .legend {
+      background:#fff; padding:8px 10px; border-radius:8px;
+      font:12px/1.3 system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+      box-shadow:0 2px 8px rgba(0,0,0,.15);
+    }
+    .legend .row { display:flex; align-items:center; gap:6px; margin:4px 0; white-space:nowrap; }
+    .sg { width:10px; height:10px; border-radius:2px; display:inline-block; }
+    .green{background:#28a745} .red{background:#dc3545} .yellow{background:#ffc107} .grey{background:#6c757d}
+
+    .divicon {
+      display:flex; gap:4px; background:#ffffffcc; padding:4px;
+      border-radius:6px; border:1px solid #ddd; align-items:center;
+    }
+    .fuelSq { width:10px; height:10px; border-radius:2px; }
+
+    .popup h4{ margin:0 0 4px 0; font:600 14px system-ui; }
+    .popup small{ color:#666; }
+    .rowline{ display:flex; align-items:center; gap:8px; margin:6px 0; }
+    .count{ margin-left:auto; color:#333; font-size:12px; }
+    .sg-inline{ width:10px; height:10px; border-radius:2px; display:inline-block; }
+
+    .btn { padding:6px 10px; border:none; border-radius:6px; color:#fff; cursor:pointer; font-size:12px; }
+    .btn.yes{ background:#28a745 } .btn.no{ background:#dc3545 }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+
+  <script>
+    const SUPABASE_URL = "https://warygfjgwawdkfpqjldc.supabase.co";
+    const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndhcnlnZmpnd2F3ZGtmcHFqbGRjIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTc0NDkwMTgsImV4cCI6MjA3MzAyNTAxOH0.l95f_H6b49bk6O4k10xtu5FHjg1Iinsyr3tCBFa_-I8";
+
+    const MAP_CENTER = [48.4701, 38.8167];
+    const MAP_ZOOM = 13;
+
+    function getAnonUUID(){
+      try {
+        const k='anon_uuid'; let v=localStorage.getItem(k);
+        if(!v){ v=(crypto.randomUUID?crypto.randomUUID():(Math.random()+"-"+Date.now())); localStorage.setItem(k,v); }
+        return v;
+      } catch(e){ return (Math.random()+"-"+Date.now()); }
+    }
+    const ANON = getAnonUUID();
+
+    async function sb(path, {method='GET', body=null}={}){
+      const res = await fetch(`${SUPABASE_URL}${path}`, {
+        method,
+        headers: {
+          'apikey': SUPABASE_ANON_KEY,
+          'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
+          'Content-Type': 'application/json'
+        },
+        body: body ? JSON.stringify(body) : null
+      });
+      if(!res.ok){
+        const t = await res.text().catch(()=>res.statusText);
+        throw new Error(`HTTP ${res.status}: ${t}`);
+      }
+      return res.json();
+    }
+
+    async function loadStations(){
+      return sb('/rest/v1/stations?select=id,name,address,lat,lon');
+    }
+    async function loadStatusFor(stationId){
+      const rows = await sb(`/rest/v1/status_cache?station_id=eq.${stationId}&select=station_id,fuel,status,last_update_ts,pos_60m,neg_60m`);
+      const byFuel = { AI92:null, AI95:null, DT:null };
+      rows.forEach(r => byFuel[r.fuel] = r);
+      return byFuel;
+    }
+    async function submitVote(stationId, fuel, yes){
+      const payload = { p_station: stationId, p_fuel: fuel, p_vote: yes, p_anon: ANON, p_user_agent: 'yandex' };
+      return sb('/rest/v1/rpc/submit_vote', { method:'POST', body: payload });
+    }
+
+    function colorForStatus(s){
+      if(s==='green') return '#28a745';
+      if(s==='red') return '#dc3545';
+      if(s==='yellow') return '#ffc107';
+      if(s==='grey') return '#6c757d';
+      return '#6c757d';
+    }
+    function formatLast(ts){
+      if(!ts) return 'нет данных';
+      const m = Math.floor((Date.now()- new Date(ts).getTime())/60000);
+      if(m<60) return `${m} мин назад`;
+      const h = Math.floor(m/60), mm = m%60;
+      return `${h} ч ${mm} мин назад`;
+    }
+
+    function getPlacemarkLayout(statusByFuel){
+      const ai92 = statusByFuel.AI92 ? colorForStatus(statusByFuel.AI92.status) : '#6c757d';
+      const ai95 = statusByFuel.AI95 ? colorForStatus(statusByFuel.AI95.status) : '#6c757d';
+      const dt   = statusByFuel.DT   ? colorForStatus(statusByFuel.DT.status)   : '#6c757d';
+
+      const html = `
+        <div class="divicon">
+          <div class="fuelSq" style="background:${ai92}" title="АИ-92"></div>
+          <div class="fuelSq" style="background:${ai95}" title="АИ-95"></div>
+          <div class="fuelSq" style="background:${dt}"   title="ДТ"></div>
+        </div>
+      `;
+      return ymaps.layout.createClass(html);
+    }
+
+    function addLegendControl(map){
+      const Legend = function (options) { this.options = options || {}; };
+      Legend.prototype = {
+        onAddToMap: function (map) {
+          this._map = map;
+          this._$content = document.createElement('div');
+          this._$content.className = 'legend';
+          this._$content.innerHTML = `
+            <div class="row"><span class="sg green"></span>Бензин есть</div>
+            <div class="row"><span class="sg red"></span>Нет бензина</div>
+            <div class="row"><span class="sg yellow"></span>Старая инфо (≥3ч)</div>
+            <div class="row"><span class="sg grey"></span>Нет данных (≥14ч)</div>
+          `;
+          map.controls.add(new ymaps.control.Button({ data:{ content:this._$content }, options:{ maxWidth: 220, selectOnClick:false } }), { float:'left' });
+        },
+        onRemoveFromMap: function(){ this._map = null; }
+      };
+      (new Legend()).onAddToMap(map);
+    }
+
+    window._vote = async (stationId, fuel, yes) => {
+      try {
+        await submitVote(stationId, fuel, yes);
+        alert('Спасибо! Голос учтён.');
+        location.reload();
+      } catch(e) {
+        alert('Ошибка голосования: ' + e.message);
+        console.error(e);
+      }
+    };
+
+    ymaps.ready(async function init(){
+      const map = new ymaps.Map('map', { center: MAP_CENTER, zoom: MAP_ZOOM, controls: ['zoomControl'] });
+      addLegendControl(map);
+
+      try{
+        const stations = await loadStations();
+
+        for(const s of stations){
+          const st = await loadStatusFor(s.id);
+          for(const k of ['AI92','AI95','DT']){
+            const r = st[k]; if(!r) continue;
+            const age = Date.now() - new Date(r.last_update_ts||0).getTime();
+            if (isFinite(age)) {
+              if (age >= 14*3600*1000) r.status = 'grey';
+              else if (age >= 3*3600*1000 && (r.status==='green'||r.status==='red')) r.status = 'yellow';
+            }
+          }
+
+          const iconLayout = getPlacemarkLayout(st);
+          const placemark = new ymaps.Placemark(
+            [s.lat, s.lon],
+            {},
+            { iconLayout: iconLayout, iconShape: { type: 'Rectangle', coordinates: [[-20,-10],[20,10]] }, hasBalloon: true }
+          );
+
+          const n92 = (st.AI92?.pos_60m ?? 0) + (st.AI92?.neg_60m ?? 0);
+          const n95 = (st.AI95?.pos_60m ?? 0) + (st.AI95?.neg_60m ?? 0);
+          const ndt = (st.DT?.pos_60m ?? 0)   + (st.DT?.neg_60m ?? 0);
+
+          const baloonHTML = `
+            <div class="popup">
+              <h4>${s.name}</h4>
+              <small>${s.address||''}</small>
+
+              <div class="rowline">
+                <b>АИ-92</b>
+                <span class="sg-inline ${st.AI92?st.AI92.status:'grey'}"></span>
+                <span>${formatLast(st.AI92?.last_update_ts)}</span>
+                <span class="count">${n92}/ч</span>
+              </div>
+              <div class="rowline">
+                <b>АИ-95</b>
+                <span class="sg-inline ${st.AI95?st.AI95.status:'grey'}"></span>
+                <span>${formatLast(st.AI95?.last_update_ts)}</span>
+                <span class="count">${n95}/ч</span>
+              </div>
+              <div class="rowline">
+                <b>ДТ</b>
+                <span class="sg-inline ${st.DT?st.DT.status:'grey'}"></span>
+                <span>${formatLast(st.DT?.last_update_ts)}</span>
+                <span class="count">${ndt}/ч</span>
+              </div>
+
+              <div class="rowline">
+                <button class="btn yes" onclick="window._vote('${s.id}','AI92',true)">АИ-92: Есть</button>
+                <button class="btn no"  onclick="window._vote('${s.id}','AI92',false)">Нет</button>
+              </div>
+              <div class="rowline">
+                <button class="btn yes" onclick="window._vote('${s.id}','AI95',true)">АИ-95: Есть</button>
+                <button class="btn no"  onclick="window._vote('${s.id}','AI95',false)">Нет</button>
+              </div>
+              <div class="rowline">
+                <button class="btn yes" onclick="window._vote('${s.id}','DT',true)">ДТ: Есть</button>
+                <button class="btn no"  onclick="window._vote('${s.id}','DT',false)">Нет</button>
+              </div>
+            </div>
+          `;
+
+          placemark.properties.set('balloonContent', baloonHTML);
+          map.geoObjects.add(placemark);
+        }
+      } catch(e){
+        alert('Ошибка загрузки данных: ' + e.message);
+        console.error(e);
+      }
+    });
+  </script>
+</body>
+</html>
