@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>АЗС Алчевск — статус топлива</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<style>
+  html, body, #map { height: 100%; margin: 0; }
+  /* Контрол-легенда (позиционируется самим Leaflet) */
+  .legend{
+    background:#fff; padding:8px 10px; border-radius:8px;
+    font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+    font-size:12px; box-shadow:0 2px 8px rgba(0,0,0,.15);
+  }
+  .legend .row{ display:flex; align-items:center; gap:6px; margin:4px 0; white-space:nowrap; }
+  .sg{ display:inline-block; width:10px; height:10px; border-radius:2px; }
+  .green{background:#28a745} .red{background:#dc3545} .yellow{background:#ffc107} .grey{background:#6c757d}
+
+  /* Внешний вид маркера с 3 квадратами */
+  .divicon { display:flex; gap:4px; background:#ffffffcc; padding:4px; border-radius:6px; border:1px solid #ddd; align-items:center; }
+  .fuelSq{ width:10px; height:10px; border-radius:2px; }
+
+  /* Попап станции */
+  .popup h4{ margin:0 0 4px 0; font:600 14px system-ui; }
+  .popup small{ color:#666; }
+  .rowline{ display:flex; align-items:center; gap:8px; margin:6px 0; }
+  .count{ margin-left:auto; color:#333; font-size:12px; }
+
+  .btn { padding:6px 10px; border:none; border-radius:6px; color:#fff; cursor:pointer; font-size:12px; }
+  .btn.yes{ background:#28a745 } .btn.no{ background:#dc3545 }
+
+  /* Чуть сдвинем зум-вигдет вниз для эстетики */
+  .leaflet-control-zoom { margin-top: 10px; }
+</style>
+</head>
+<body>
+<div id="map"></div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+// ====== НАСТРОЙКИ SUPABASE (твои) ======
+const SUPABASE_URL = "https://warygfjgwawdkfpqjldc.supabase.co";
+const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndhcnlnZmpnd2F3ZGtmcHFqbGRjIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTc0NDkwMTgsImV4cCI6MjA3MzAyNTAxOH0.l95f_H6b49bk6O4k10xtu5FHjg1Iinsyr3tCBFa_-I8";
+// =======================================
+
+// Центр Алчевска
+const map = L.map('map', { zoomControl: true }).setView([48.4701, 38.8167], 13);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  maxZoom: 19, attribution: '&copy; OpenStreetMap contributors'
+}).addTo(map);
+
+// ЛЕГЕНДА как Leaflet-контрол
+const LegendControl = L.Control.extend({
+  options: { position: 'topleft' },
+  onAdd: function() {
+    const div = L.DomUtil.create('div', 'legend');
+    div.innerHTML = `
+      <div class="row"><span class="sg green"></span>Бензин есть</div>
+      <div class="row"><span class="sg red"></span>Нет бензина</div>
+      <div class="row"><span class="sg yellow"></span>Старая инфо (≥3ч)</div>
+      <div class="row"><span class="sg grey"></span>Нет данных (≥14ч)</div>
+    `;
+    L.DomEvent.disableClickPropagation(div);
+    return div;
+  }
+});
+map.addControl(new LegendControl());
+
+// Утилиты
+function getAnonUUID(){
+  try {
+    const k = 'anon_uuid';
+    let v = localStorage.getItem(k);
+    if(!v){ v = (crypto.randomUUID ? crypto.randomUUID() : (Math.random()+"-"+Date.now())); localStorage.setItem(k, v); }
+    return v;
+  } catch(e){ return (Math.random()+"-"+Date.now()); }
+}
+const ANON = getAnonUUID();
+
+function colorForStatus(st){ 
+  if (st === 'green') return '#28a745';
+  if (st === 'red')   return '#dc3545';
+  if (st === 'yellow')return '#ffc107';
+  if (st === 'grey')  return '#6c757d';
+  return '#6c757d';
+}
+async function fetchJSON(path, {method='GET', body=null}={}){
+  const res = await fetch(`${SUPABASE_URL}${path}`, {
+    method,
+    headers: {
+      'apikey': SUPABASE_ANON_KEY,
+      'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
+      'Content-Type':'application/json'
+    },
+    body: body ? JSON.stringify(body) : null
+  });
+  if(!res.ok){
+    const txt = await res.text().catch(()=>'');
+    throw new Error(`HTTP ${res.status}: ${txt}`);
+  }
+  return await res.json();
+}
+
+async function loadStations(){
+  return await fetchJSON('/rest/v1/stations?select=id,name,address,lat,lon');
+}
+async function loadStatusFor(stationId){
+  const data = await fetchJSON(`/rest/v1/status_cache?station_id=eq.${stationId}&select=station_id,fuel,status,last_update_ts,pos_60m,neg_60m`);
+  const byFuel = { AI92:null, AI95:null, DT:null };
+  for(const r of data){ byFuel[r.fuel] = r; }
+  return byFuel;
+}
+async function submitVote(stationId, fuel, voteBool){
+  const body = { p_station: stationId, p_fuel: fuel, p_vote: voteBool, p_anon: ANON, p_user_agent: 'pages' };
+  return await fetchJSON('/rest/v1/rpc/submit_vote', { method:'POST', body });
+}
+
+function makeDivIcon(statusByFuel){
+  const ai92 = statusByFuel.AI92 ? colorForStatus(statusByFuel.AI92.status) : '#6c757d';
+  const ai95 = statusByFuel.AI95 ? colorForStatus(statusByFuel.AI95.status) : '#6c757d';
+  const dt   = statusByFuel.DT   ? colorForStatus(statusByFuel.DT.status)   : '#6c757d';
+  const html = `<div class="divicon">
+      <div class="fuelSq" style="background:${ai92}" title="АИ-92"></div>
+      <div class="fuelSq" style="background:${ai95}" title="АИ-95"></div>
+      <div class="fuelSq" style="background:${dt}"   title="ДТ"></div>
+    </div>`;
+  return L.divIcon({ html, className: '', iconSize: [40,18] });
+}
+function formatLast(ts){
+  if(!ts) return 'нет данных';
+  const ageMin = Math.floor((Date.now()- new Date(ts).getTime())/60000);
+  if (ageMin<60) return `${ageMin} мин назад`;
+  const h = Math.floor(ageMin/60), m = ageMin%60;
+  return `${h} ч ${m} мин назад`;
+}
+
+// Загрузка и отрисовка
+async function init(){
+  try{
+    const stations = await loadStations();
+    for(const s of stations){
+      const statusByFuel = await loadStatusFor(s.id);
+      // Авто-серый/жёлтый по давности
+      for (const k of ['AI92','AI95','DT']) {
+        const r = statusByFuel[k];
+        if(!r) continue;
+        const age = Date.now()- new Date(r.last_update_ts||0).getTime();
+        if (isFinite(age)) {
+          if (age >= 14*3600*1000) r.status = 'grey';
+          else if (age >= 3*3600*1000 && (r.status==='green'||r.status==='red')) r.status = 'yellow';
+        }
+      }
+      const marker = L.marker([s.lat, s.lon], { icon: makeDivIcon(statusByFuel) }).addTo(map);
+
+      const n92 = (statusByFuel.AI92?.pos_60m ?? 0) + (statusByFuel.AI92?.neg_60m ?? 0);
+      const n95 = (statusByFuel.AI95?.pos_60m ?? 0) + (statusByFuel.AI95?.neg_60m ?? 0);
+      const ndt = (statusByFuel.DT?.pos_60m ?? 0)   + (statusByFuel.DT?.neg_60m ?? 0);
+
+      const popup = L.popup({ maxWidth: 360 }).setContent(`
+        <div class="popup">
+          <h4>${s.name}</h4>
+          <small>${s.address||''}</small>
+          <div class="rowline">
+            <b>АИ-92</b>
+            <span class="sg ${statusByFuel.AI92?statusByFuel.AI92.status:'grey'}"></span>
+            <span>${formatLast(statusByFuel.AI92?.last_update_ts)}</span>
+            <span class="count">${n92}/ч</span>
+          </div>
+          <div class="rowline">
+            <b>АИ-95</b>
+            <span class="sg ${statusByFuel.AI95?statusByFuel.AI95.status:'grey'}"></span>
+            <span>${formatLast(statusByFuel.AI95?.last_update_ts)}</span>
+            <span class="count">${n95}/ч</span>
+          </div>
+          <div class="rowline">
+            <b>ДТ</b>
+            <span class="sg ${statusByFuel.DT?statusByFuel.DT.status:'grey'}"></span>
+            <span>${formatLast(statusByFuel.DT?.last_update_ts)}</span>
+            <span class="count">${ndt}/ч</span>
+          </div>
+          <div class="rowline">
+            <button class="btn yes" onclick="window._vote('${s.id}','AI92',true)">АИ-92: Есть</button>
+            <button class="btn no"  onclick="window._vote('${s.id}','AI92',false)">Нет</button>
+          </div>
+          <div class="rowline">
+            <button class="btn yes" onclick="window._vote('${s.id}','AI95',true)">АИ-95: Есть</button>
+            <button class="btn no"  onclick="window._vote('${s.id}','AI95',false)">Нет</button>
+          </div>
+          <div class="rowline">
+            <button class="btn yes" onclick="window._vote('${s.id}','DT',true)">ДТ: Есть</button>
+            <button class="btn no"  onclick="window._vote('${s.id}','DT',false)">Нет</button>
+          </div>
+        </div>
+      `);
+      marker.bindPopup(popup);
+    }
+  }catch(e){
+    alert('Ошибка загрузки данных: ' + e.message);
+    console.error(e);
+  }
+}
+
+// Глобальный обработчик голосования
+let votingLock = false;
+window._vote = async (stationId, fuel, yes) => {
+  if (votingLock) return;
+  votingLock = true;
+  try {
+    await submitVote(stationId, fuel, yes);
+    alert('Спасибо! Голос учтён.');
+    location.reload();
+  } catch(e) {
+    alert('Ошибка голосования: ' + e.message);
+    console.error(e);
+  } finally {
+    votingLock = false;
+  }
+};
+
+init();
+</script>
+</body>
+</html>
