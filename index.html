@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Карта АЗС</title>
+  <script src="https://api-maps.yandex.ru/2.1/?lang=ru_RU" type="text/javascript"></script>
+  <style>
+    html, body, #map {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      padding: 0;
+    }
+    .legend {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      background: #fff;
+      padding: 10px;
+      border-radius: 8px;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.2);
+      font-family: Arial, sans-serif;
+      font-size: 14px;
+    }
+    .sq {
+      display: inline-block;
+      width: 16px;
+      height: 16px;
+      margin-right: 6px;
+      border-radius: 2px;
+    }
+    .green { background: #28a745; }
+    .red { background: #dc3545; }
+    .yellow { background: #ffc107; }
+    .grey { background: #6c757d; }
+    .fuelBox {
+      width: 40px;
+      height: 40px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 14px;
+      font-weight: bold;
+      color: white;
+      border: 2px solid black;
+      box-sizing: border-box;
+    }
+    .fuelWrapper {
+      display: flex;
+      gap: 4px;
+    }
+  </style>
+</head>
+<body>
+<div id="map"></div>
+<div class="legend">
+  <div><span class="sq green"></span>Бензин есть</div>
+  <div><span class="sq red"></span>Нет бензина</div>
+  <div><span class="sq yellow"></span>Старая инфо (≥3ч)</div>
+  <div><span class="sq grey"></span>Нет данных (≥14ч)</div>
+</div>
+<script>
+  const SUPABASE_URL = "https://warygfjgwawdkfpqjldc.supabase.co";
+  const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndhcnlnZmpnd2F3ZGtmcHFqbGRjIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTc0NDkwMTgsImV4cCI6MjA3MzAyNTAxOH0.l95f_H6b49bk6O4k10xtu5FHjg1Iinsyr3tCBFa_-I8";
+
+  async function fetchStations() {
+    const res = await fetch(SUPABASE_URL + "/rest/v1/stations?select=*", {
+      headers: { apikey: SUPABASE_ANON_KEY, Authorization: "Bearer " + SUPABASE_ANON_KEY }
+    });
+    return await res.json();
+  }
+
+  ymaps.ready(async function() {
+    const map = new ymaps.Map("map", { center: [48.4701, 38.8167], zoom: 12 });
+
+    const stations = await fetchStations();
+    console.log("stations:", stations);
+
+    let bounds = [];
+
+    stations.forEach(st => {
+      if (st.lat && st.lon) {
+        bounds.push([st.lat, st.lon]);
+
+        const layout = ymaps.templateLayoutFactory.createClass(
+          `<div class="fuelWrapper">
+             <div class="fuelBox" style="background:${st.status_ai92||'#6c757d'}">92</div>
+             <div class="fuelBox" style="background:${st.status_ai95||'#6c757d'}">95</div>
+             <div class="fuelBox" style="background:${st.status_dt||'#6c757d'}">ДТ</div>
+           </div>`
+        );
+
+        const placemark = new ymaps.Placemark([st.lat, st.lon], {
+          balloonContent: `<b>${st.name||'АЗС'}</b><br>${st.address||''}`
+        }, {
+          iconLayout: layout,
+          iconShape: { type: 'Rectangle', coordinates: [[0,0],[120,40]] }
+        });
+
+        map.geoObjects.add(placemark);
+      }
+    });
+
+    if (bounds.length > 0) {
+      map.setBounds(bounds, { checkZoomRange:true, zoomMargin:50 });
+    }
+  });
+</script>
+</body>
+</html>
